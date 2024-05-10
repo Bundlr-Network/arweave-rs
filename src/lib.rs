@@ -1,3 +1,4 @@
+use jsonwebkey as jwk;
 use std::{fs, path::PathBuf, str::FromStr};
 
 use consts::MAX_TX_DATA;
@@ -52,6 +53,7 @@ pub struct Arweave {
 pub struct ArweaveBuilder {
     base_url: Option<url::Url>,
     keypair_path: Option<PathBuf>,
+    jwk: Option<jwk::JsonWebKey>,
 }
 
 impl ArweaveBuilder {
@@ -69,6 +71,11 @@ impl ArweaveBuilder {
         self
     }
 
+    pub fn jwk(mut self, jwk: jwk::JsonWebKey) -> ArweaveBuilder {
+        self.jwk = Some(jwk);
+        self
+    }
+
     pub fn build(self) -> Result<Arweave, Error> {
         let base_url = self
             .base_url
@@ -76,7 +83,10 @@ impl ArweaveBuilder {
 
         let signer = match self.keypair_path {
             Some(p) => Some(ArweaveSigner::from_keypair_path(p)?),
-            None => None,
+            None => match self.jwk {
+                Some(jwk) => Some(ArweaveSigner::from_jwk(jwk)),
+                None => todo!(),
+            },
         };
 
         Ok(Arweave {
@@ -152,11 +162,15 @@ impl Arweave {
         verify(pub_key, message, signature)
     }
 
-    pub async fn post_transaction(&self, signed_transaction: &Tx) -> Result<(String, u64), Error> {
-        self.tx_client
-            .post_transaction(signed_transaction)
-            .await
-            .map(|(id, reward)| (id.to_string(), reward))
+    pub async fn post_transaction(&self, signed_transaction: Tx) -> Result<(String, u64), Error> {
+        if signed_transaction.data.0.len() > MAX_TX_DATA as usize {
+            self.post_transaction_chunks(signed_transaction, 100).await
+        } else {
+            self.tx_client
+                .post_transaction(&signed_transaction)
+                .await
+                .map(|(id, reward)| (id.to_string(), reward))
+        }
     }
 
     async fn get_last_tx(&self) -> Result<Base64, Error> {
@@ -206,27 +220,49 @@ impl Arweave {
                 Tag::from_utf8_strs("Content-Type", content_type.as_ref())?;
             additional_tags.push(content_tag);
         }
-
         let data = fs::read(file_path)?;
+
+        self.post_bytes(data, auto_content_tag, additional_tags, fee)
+            .await
+    }
+
+    pub async fn upload_bytes<T: AsRef<[u8]>>(
+        &self,
+        buffer: T,
+        mime_type: Option<&str>,
+        additional_tags: Vec<Tag<Base64>>,
+        fee: u64,
+    ) -> Result<(String, u64), Error> {
+        let mut auto_content_tag = true;
+        let mut additional_tags = additional_tags;
+        if let Some(mime_type) = mime_type {
+            let content_tag: Tag<Base64> = Tag::from_utf8_strs("Content-Type", mime_type)?;
+            additional_tags.push(content_tag);
+            auto_content_tag = false;
+        };
+        self.post_bytes(buffer, auto_content_tag, additional_tags, fee)
+            .await
+    }
+
+    async fn post_bytes<T: AsRef<[u8]>>(
+        &self,
+        buffer: T,
+        auto_content_tag: bool,
+        additional_tags: Vec<Tag<Base64>>,
+        fee: u64,
+    ) -> Result<(String, u64), Error> {
         let transaction = self
             .create_transaction(
                 Base64(b"".to_vec()),
                 additional_tags,
-                data,
+                buffer.as_ref().into(),
                 0,
                 fee,
                 auto_content_tag,
             )
             .await?;
         let signed_transaction = self.sign_transaction(transaction)?;
-        let (id, reward) = if signed_transaction.data.0.len() > MAX_TX_DATA as usize {
-            self.post_transaction_chunks(signed_transaction, 100)
-                .await?
-        } else {
-            self.post_transaction(&signed_transaction).await?
-        };
-
-        Ok((id, reward))
+        self.post_transaction(signed_transaction).await
     }
 
     async fn post_transaction_chunks(
@@ -239,7 +275,11 @@ impl Arweave {
         }
 
         let transaction_with_no_data = signed_transaction.clone_with_no_data()?;
-        let (id, reward) = self.post_transaction(&transaction_with_no_data).await?;
+        let (id, reward) = self
+            .tx_client
+            .post_transaction(&transaction_with_no_data)
+            .await
+            .map(|(id, reward)| (id.to_string(), reward))?;
 
         let results: Vec<Result<usize, Error>> =
             Self::upload_transaction_chunks_stream(self, signed_transaction, chunks_buffer)

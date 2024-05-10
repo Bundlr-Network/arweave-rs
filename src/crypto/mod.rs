@@ -1,3 +1,4 @@
+use jsonwebkey as jwk;
 use std::path::PathBuf;
 
 use crate::error::Error;
@@ -23,6 +24,10 @@ impl Provider {
     pub fn from_keypair_path(keypair_path: PathBuf) -> Result<Self, Error> {
         let signer = Signer::from_keypair_path(keypair_path)?;
         Ok(Provider::new(Box::new(signer)))
+    }
+
+    pub fn from_jwk(jwk: jwk::JsonWebKey) -> Self {
+        Self::new(Box::new(Signer::from_jwk(jwk)))
     }
 
     pub fn new(signer: Box<Signer>) -> Self {

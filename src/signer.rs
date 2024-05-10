@@ -1,10 +1,9 @@
-use std::path::PathBuf;
-
 use data_encoding::BASE64URL;
-use jsonwebkey::JsonWebKey;
+use jsonwebkey as jwk;
 use rand::thread_rng;
 use rsa::{pkcs8::DecodePublicKey, PaddingScheme, PublicKey, RsaPublicKey};
 use sha2::Digest;
+use std::path::PathBuf;
 
 use crate::{
     crypto::{
@@ -31,6 +30,13 @@ impl ArweaveSigner {
             crypto: Box::new(crypto),
         };
         Ok(signer)
+    }
+
+    pub fn from_jwk(jwk: jwk::JsonWebKey) -> Self {
+        let crypto = Provider::from_jwk(jwk);
+        ArweaveSigner {
+            crypto: Box::new(crypto),
+        }
     }
 
     pub fn sign_transaction(&self, mut transaction: Tx) -> Result<Tx, Error> {
@@ -60,7 +66,7 @@ impl ArweaveSigner {
             "{{\"kty\":\"RSA\",\"e\":\"AQAB\",\"n\":\"{}\"}}",
             BASE64URL.encode(&transaction.owner.0)
         );
-        let jwk: JsonWebKey = jwt_str.parse().unwrap();
+        let jwk: jwk::JsonWebKey = jwt_str.parse().unwrap();
 
         let pub_key = RsaPublicKey::from_public_key_der(jwk.key.to_der().as_slice()).unwrap();
         let mut hasher = sha2::Sha256::new();
@@ -98,11 +104,11 @@ impl ArweaveSigner {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, str::FromStr};
+    use std::{fs, path::PathBuf, str::FromStr};
 
     use crate::error::Error;
 
-    use super::{ArweaveSigner, Base64};
+    use super::{jwk, ArweaveSigner, Base64};
 
     impl Default for ArweaveSigner {
         fn default() -> Self {
@@ -123,9 +129,19 @@ mod tests {
             .to_vec(),
         );
         let path = PathBuf::from_str("res/test_wallet.json").unwrap();
+        let jwk: jwk::JsonWebKey = fs::read_to_string(&path)?.parse().unwrap();
+
         let signer = ArweaveSigner::from_keypair_path(path)?;
         let signature = signer.sign(&message.0)?;
         let pubk = signer.get_public_key();
-        ArweaveSigner::verify(&pubk.0, &message.0, &signature.0)
+        let result = ArweaveSigner::verify(&pubk.0, &message.0, &signature.0);
+        assert!(result.is_ok());
+
+        let signer = ArweaveSigner::from_jwk(jwk);
+        let signature = signer.sign(&message.0)?;
+        let pubk = signer.get_public_key();
+        let result = ArweaveSigner::verify(&pubk.0, &message.0, &signature.0);
+        assert!(result.is_ok());
+        Ok(())
     }
 }
